@@ -7,16 +7,14 @@ import os
 from datetime import datetime
 import platform
 
-# Danh sách 50 nguồn API proxy
+# Danh sách 50 nguồn API proxy, đảm bảo không bị cắt dở
 PROXY_APIS = {
     'http': [
         'https://www.proxy-list.download/api/v1/get?type=http',
         'https://api.proxyscrape.com/?request=getproxies&proxytype=http&country=all',
         'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt',
         'https://vakhov.github.io/fresh-proxy-list/http.txt',
-        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http
-
-.txt',
+        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
         'http://pubproxy.com/api/proxy?limit=20&format=txt&type=http',
         'https://api.getproxylist.com/proxy?protocol[]=http',
         'https://proxyelite.info/free-proxy-list/?type=http',
@@ -147,10 +145,11 @@ async def check_proxy(session, proxy, proxy_type, timeout=5):
     }
     
     try:
-        async with session.get(test_urls[proxy_type], proxies=proxies, timeout=timeout) as response:
+        async with session.get(test_urls[proxy_type], proxy=proxies['http'], timeout=timeout) as response:
             if response.status == 200:
                 return True
-    except:
+    except Exception as e:
+        print(f"Lỗi kiểm tra proxy {proxy}: {e}")
         return False
     return False
 
@@ -161,10 +160,9 @@ async def fetch_proxies_from_apis(proxy_type):
         try:
             response = requests.get(api_url, timeout=10)
             if response.status_code == 200:
-                proxy_list = response.text.splitlines()
+                proxy_list = [p.strip() for p in response.text.splitlines() if p.strip()]
                 for proxy in proxy_list:
-                    proxy = proxy.strip()
-                    if proxy and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}$', proxy):
+                    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}$', proxy):
                         proxies.add(proxy)
                 print(f"Đã lấy {len(proxy_list)} proxy từ {api_url}")
             else:
@@ -177,56 +175,63 @@ async def fetch_proxies_from_apis(proxy_type):
 async def scan_proxies(proxy_type, output_file):
     try:
         proxies = await fetch_proxies_from_apis(proxy_type)
-        valid_proxies = []
+        if not proxies:
+            print("Không tìm thấy proxy nào từ các nguồn API.")
+            return
         
+        valid_proxies = []
         async with aiohttp.ClientSession() as session:
-            tasks = []
-            for proxy in proxies:
-                tasks.append(check_proxy(session, proxy, proxy_type))
-            
+            tasks = [check_proxy(session, proxy, proxy_type) for proxy in proxies]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for proxy, result in zip(proxies, results):
-                if result:
+                if isinstance(result, bool) and result:
                     valid_proxies.append(proxy)
                     print(f"Valid {proxy_type} proxy: {proxy}")
         
         # Lưu kết quả vào file
-        with open(output_file, 'w') as f:
-            for proxy in valid_proxies:
-                f.write(f"{proxy}\n")
-        print(f"Đã lưu {len(valid_proxies)} proxy hợp lệ vào {output_file}")
-        
+        if valid_proxies:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                for proxy in valid_proxies:
+                    f.write(f"{proxy}\n")
+            print(f"Đã lưu {len(valid_proxies)} proxy hợp lệ vào {output_file}")
+        else:
+            print("Không có proxy nào hợp lệ để lưu.")
     except Exception as e:
         print(f"Lỗi khi scan proxy: {e}")
 
 # Hàm lọc proxy từ file txt
 async def filter_proxies(proxy_type, input_file, output_file):
     try:
-        with open(input_file, 'r') as f:
-            proxies = f.read().splitlines()
+        if not os.path.exists(input_file):
+            print(f"Tệp {input_file} không tồn tại.")
+            return
+        
+        with open(input_file, 'r', encoding='utf-8') as f:
+            proxies = [p.strip() for p in f.read().splitlines() if p.strip()]
+        
+        if not proxies:
+            print("Tệp không chứa proxy hợp lệ.")
+            return
         
         valid_proxies = []
         async with aiohttp.ClientSession() as session:
-            tasks = []
-            for proxy in proxies:
-                proxy = proxy.strip()
-                if proxy:
-                    tasks.append(check_proxy(session, proxy, proxy_type))
-            
+            tasks = [check_proxy(session, proxy, proxy_type) for proxy in proxies]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for proxy, result in zip(proxies, results):
-                if result:
+                if isinstance(result, bool) and result:
                     valid_proxies.append(proxy)
                     print(f"Valid {proxy_type} proxy: {proxy}")
         
         # Lưu kết quả vào file
-        with open(output_file, 'w') as f:
-            for proxy in valid_proxies:
-                f.write(f"{proxy}\n")
-        print(f"Đã lưu {len(valid_proxies)} proxy hợp lệ vào {output_file}")
-        
+        if valid_proxies:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                for proxy in valid_proxies:
+                    f.write(f"{proxy}\n")
+            print(f"Đã lưu {len(valid_proxies)} proxy hợp lệ vào {output_file}")
+        else:
+            print("Không có proxy nào hợp lệ để lưu.")
     except Exception as e:
         print(f"Lỗi khi lọc proxy: {e}")
 
@@ -241,8 +246,15 @@ def main():
     print("\nChọn loại proxy:")
     for i, p_type in enumerate(proxy_types, 1):
         print(f"{i}. {p_type.upper()}")
-    proxy_choice = int(input("Nhập số (1-3): ")) - 1
-    proxy_type = proxy_types[proxy_choice]
+    try:
+        proxy_choice = int(input("Nhập số (1-3): ")) - 1
+        if proxy_choice not in range(3):
+            print("Lựa chọn không hợp lệ!")
+            return
+        proxy_type = proxy_types[proxy_choice]
+    except ValueError:
+        print("Vui lòng nhập một số!")
+        return
     
     # Tạo tên file đầu ra
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
